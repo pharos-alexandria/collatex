@@ -66,10 +66,21 @@ def collate(collation, output="table", layout="horizontal", segmentation=True, n
         return display_variant_graph_as_svg(graph, output)
     if output == "graph":
         return graph
+    
     # create alignment table
-    table = AlignmentTable(collation, graph, layout, ranking)
+    table = AlignmentTable(collation, graph, layout)
+    if collation.pretokenized and not segmentation:
+        token_list = [[tk.token_data for tk in witness.tokens()] for witness in collation.witnesses]
+        # only with segmentation=False
+        # there could be a different comportment of get_tokenized_table if semgentation=True
+        table = get_tokenized_at(table, token_list, segmentation=segmentation, layout=layout)
+        # for display purpose, table and html output will return only token 't' (string) and not the full token_data (dict)
+        if output=="table" or output=="html":
+            for row in table.rows:
+                row.cells = [cell["t"] for cell in row.cells]
+    
     if output == "json":
-        return export_alignment_table_as_json(table)
+        return export_alignment_table_as_json(table, layout=layout)
     if output == "html":
         return display_alignment_table_as_html(table)
     if output == "html2":
@@ -83,11 +94,41 @@ def collate(collation, output="table", layout="horizontal", segmentation=True, n
     if output == "csv" or output == "tsv":
         return display_alignment_table_as_csv(table, output)
     else:
-        raise Exception("Unknown output type: " + output)
+        raise Exception("Unknown output type: "+output)
+    
+def get_tokenized_at(table, token_list, segmentation=False, layout="horizontal"):
+    tokenized_at = AlignmentTable(Collation(), layout=layout)
+    for witness_row, witness_tokens in zip(table.rows, token_list):
+        new_row = Row(witness_row.header)
+        tokenized_at.rows.append(new_row)
+        counter = 0
+        for cell in witness_row.cells:
+            if cell == "-":
+                # TODO: should probably be null or None instead, but that would break the rendering at the moment (line 41)
+                new_row.cells.append({"t" : "-"})
+            # if segmentation=False    
+            else: 
+                new_row.cells.append(witness_tokens[counter])
+                counter+=1
+            # else if segmentation=True
+                ##token_list must be a list of Token instead of list of dict (update lines 34, 64)
+                ##line 41 will not be happy in case of table/html output
+                #string = witness_tokens[counter].token_string
+                #token_counter = 1
+                #while string != cell :
+                #    if counter+token_counter-1 < len(witness_tokens)-1:
+                #        #add token_string of the next token until it is equivalent to the string in the cell
+                #        #if we are not at the last token
+                #        string += ' '+witness_tokens[counter+token_counter].token_string
+                #        token_counter += 1
+                ##there is one list level too many in the output
+                #new_row.cells.append([tk.token_data for tk in witness_tokens[counter:counter+token_counter]])
+                #counter += token_counter.
+    return tokenized_at
 
-
-def export_alignment_table_as_json(table, indent=None, status=False):
-    json_output = {"table": []}
+def export_alignment_table_as_json(table, indent=None, status=False, layout="horizontal"):
+    json_output = {}
+    json_output["table"]=[]
     sigli = []
     for row in table.rows:
         sigli.append(row.header)
@@ -98,69 +139,93 @@ def export_alignment_table_as_json(table, indent=None, status=False):
         variant_status = []
         for column in table.columns:
             variant_status.append(column.variant)
-        json_output["status"] = variant_status
-    return json.dumps(json_output, sort_keys=True, indent=indent, ensure_ascii=False)
+        json_output["status"]=variant_status
+    if layout=="vertical":
+        new_table = [[row[i] for row in json_output["table"]] for i in range(len(row.cells))]
+        json_output["table"] = new_table
+    return json.dumps(json_output, sort_keys=True, indent=indent)
+
+'''
+Suffix specific implementation of Collation object
+'''
+class Collation(object):
+
+    @classmethod
+    def create_from_dict(cls, data, limit=None):
+        if "witnesses" not in data:
+            raise UnsupportedError("Json input not valid")
+        witnesses = data["witnesses"]
+        collation = Collation()
+        for witness in witnesses[:limit]:
+            # generate collation object from json_data
+            collation.add_witness(witness)
+            # determine if data is pretokenized
+            if 'tokens' in witness:
+                collation.pretokenized = True
+        return collation
+
+    # json input can be a string or a file
+    @classmethod
+    def create_from_json_string(cls, json_string):
+        data = json.loads(json_string)
+        collation = cls.create_from_dict(data)
+        return collation
+    
+    @classmethod
+    def create_from_json_file(cls, json_path):
+        with open(json_path, 'r') as json_file:
+            data = json.load(json_file)
+        collation = cls.create_from_dict(data)
+        return collation
+
+    def __init__(self):
+        self.witnesses = []
+        self.pretokenized = False
+        self.counter = 0
+        self.witness_ranges = {}
+        self.cached_suffix_array = None
+        self.combined_tokens =[]
+
+    def add_witness(self, witnessdata):
+        # clear the suffix array and LCP array cache
+        self.cached_suffix_array = None
+        witness = Witness(witnessdata)
+        self.witnesses.append(witness)
+        witness_range = RangeSet()
+        witness_range.add_range(self.counter, self.counter+len(witness.tokens()))
+        # the extra one is for the marker token
+        self.counter += len(witness.tokens()) +2 # $ + number 
+        self.witness_ranges[witness.sigil] = witness_range
+        if len(self.witnesses) > 1:
+            self.combined_tokens.append('$')
+            self.combined_tokens.append(str(len(self.witnesses)-1))
+        for tk in witness.tokens():
+            self.combined_tokens.append(tk.token_string)
+
+    def add_plain_witness(self, sigil, content):
+        return self.add_witness({'id':sigil, 'content':content})
+
+    def get_range_for_witness(self, witness_sigil):
+        if not witness_sigil in self.witness_ranges:
+            raise Exception("Witness "+witness_sigil+" is not added to the collation!")
+        return self.witness_ranges[witness_sigil]
+
+    def get_sa(self):
+        #NOTE: implemented in a lazy manner, since calculation of the Suffix Array and LCP Array takes time
+        if not self.cached_suffix_array:
+            # Unit byte is done to skip tokenization in third party library
+            self.cached_suffix_array = SuffixArray(self.combined_tokens, unit=UNIT_BYTE)
+        return self.cached_suffix_array
+
+    def get_suffix_array(self):
+        sa = self.get_sa()
+        return sa.SA
+
+    def get_lcp_array(self):
+        sa = self.get_sa()
+        return sa._LCP_values
+
+    def to_extended_suffix_array(self):
+        return ExtendedSuffixArray(self.combined_tokens, self.get_suffix_array(), self.get_lcp_array())
 
 
-def export_alignment_table_as_xml(table):
-    readings = []
-    for column in table.columns:
-        app = etree.Element('app')
-        for key, value in sorted(column.tokens_per_witness.items()):
-            child = etree.Element('rdg')
-            child.attrib['wit'] = "#" + key
-            child.text = "".join(str(item.token_data["t"]) for item in value)
-            app.append(child)
-        # Without the encoding specification, outputs bytes instead of a string
-        result = etree.tostring(app, encoding="unicode")
-        readings.append(result)
-    return "<root>" + "".join(readings) + "</root>"
-
-
-def export_alignment_table_as_tei(table, indent=None):
-    d = Document()
-    root = d.createElementNS("http://interedition.eu/collatex/ns/1.0", "cx:apparatus") # fake namespace declarations
-    root.setAttribute("xmlns:cx", "http://interedition.eu/collatex/ns/1.0")
-    root.setAttribute("xmlns", "http://www.tei-c.org/ns/1.0")
-    d.appendChild(root)
-    for column in table.columns:
-        value_dict = defaultdict(list)
-        ws_flag = False
-        for key, value in sorted(column.tokens_per_witness.items()):
-            # value_dict key is reading, value is list of witnesses
-            t_readings = "".join(item.token_data["t"] for item in value)
-            if ws_flag == False and t_readings.endswith((" ", r"\u0009", r"\000a")): # space, tab, lf
-                ws_flag = True
-            value_dict[t_readings.strip()].append(key)
-
-        # REVIEW [RHD]: Isn't there a method on table that can be used instead of this len(next(iter() etc?
-        # otherwise I think there should be. Not sure what len(next(iter(etc))) represents.
-        #
-        # See https://stackoverflow.com/questions/4002874/non-destructive-version-of-pop-for-a-dictionary
-        # It returns the number of witnesses that attest the one reading in the dictionary, that is, it peeks
-        #   nondestructively at the value of the single dictionary item, which is a list, and counts the members
-        #   of the list
-        if len(value_dict) == 1 and len(next(iter(value_dict.values()))) == len(table.rows):
-            # len(table.rows) is total number of witnesses; guards against nulls, which aren't in table
-            key, value = value_dict.popitem() # there's just one item
-            text_node = d.createTextNode(key)
-            root.appendChild(text_node)
-        else:
-            # variation is either more than one reading, or one reading plus nulls
-            app = d.createElementNS("http://www.tei-c.org/ns/1.0", "app")
-            root.appendChild(app)
-            for key, value in value_dict.items():
-                # key is reading (with trailing whitespace stripped), value is list of witnesses
-                rdg = d.createElementNS("http://www.tei-c.org/ns/1.0", "rdg")
-                rdg.setAttribute("wit", " ".join(["#" + item for item in value_dict[key]]))
-                text_node = d.createTextNode(key)
-                rdg.appendChild(text_node)
-                app.appendChild(rdg)
-        if ws_flag:
-            text_node = d.createTextNode(" ")
-            root.appendChild(text_node)
-    if indent:
-        result = d.toprettyxml()
-    else:
-        result = d.toxml()
-    return result

@@ -14,37 +14,7 @@ from networkx.algorithms.dag import topological_sort
 import re
 from prettytable import PrettyTable
 from textwrap import fill
-from collatex.exceptions import TokenError
-from collections import defaultdict
-
-
-class Collation(object):
-    @classmethod
-    def create_from_dict(cls, data, limit=None):
-        witnesses = data["witnesses"]
-        collation = Collation()
-        for witness in witnesses[:limit]:
-            # generate collation object from json_data
-            collation.add_witness(witness)
-        return collation
-
-    @classmethod
-    # json_data can be a string or a file
-    def create_from_json(cls, json_data):
-        data = json.load(json_data)
-        collation = cls.create_from_dict(data)
-        return collation
-
-    def __init__(self):
-        self.witnesses = []
-
-    def add_witness(self, witnessdata):
-        witness = Witness(witnessdata)
-        self.witnesses.append(witness)
-
-    def add_plain_witness(self, sigil, content):
-        return self.add_witness({'id': sigil, 'content': content})
-
+from collatex.exceptions import TokenError, UnsupportedError
 
 class Row(object):
     def __init__(self, header):
@@ -183,21 +153,21 @@ class Token(object):
 
 class Witness(object):
     def __init__(self, witnessdata):
+        if 'id' not in witnessdata:
+            raise UnsupportedError("No defined id in witnessdata")
         self.sigil = witnessdata['id']
         self._tokens = []
         if 'content' in witnessdata:
-            self.content = witnessdata['content']
-            # print("Witness "+sigil+" TOKENIZER IS CALLED!")
             tokenizer = WordPunctuationTokenizer()
-            tokens_as_strings = tokenizer.tokenize(self.content)
+            tokens_as_strings = tokenizer.tokenize(witnessdata['content'])
             for token_string in tokens_as_strings:
                 self._tokens.append(Token({'t': token_string, 'n': re.sub(r'\s+$', '', token_string)}))
         elif 'tokens' in witnessdata:
             for tk in witnessdata['tokens']:
                 self._tokens.append(Token(tk))
-            # content string is used for generation of the suffix and LCP arrays.
-            self.content = ' '.join([x.token_string for x in self._tokens])
-
+        else:
+            raise UnsupportedError("No defined content/tokens in witness "+self.sigil)
+            
     def tokens(self):
         return self._tokens
 

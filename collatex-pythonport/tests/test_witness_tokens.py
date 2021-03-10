@@ -5,7 +5,8 @@ Created on Nov 20, 2014
 '''
 
 import unittest
-from collatex import Collation, collate
+from collatex import Collation
+from collatex.core_functions import collate
 
 
 class Test(unittest.TestCase):
@@ -51,7 +52,8 @@ class Test(unittest.TestCase):
                 }
             ]
         }
-        result = collate(pretokenized_witness, segmentation=False)
+        c = Collation.create_from_dict(pretokenized_witness)
+        result = collate(c, segmentation=False)
         self.assertEqual(len(result.rows[0].to_list()), 4)
         self.assertEqual(len(result.rows[1].to_list()), 4)
         # The second witness should have a token that reads 'mousedog bird'.
